@@ -14,4 +14,4 @@ if not defined VSDIR (
     exit /b 1
 )
 call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul
-cl /nologo /O1 /Os /GS- /Zl /utf-8 /W3 ravencuu.c /Fe:ravencuu.exe /link /NODEFAULTLIB kernel32.lib shell32.lib /ENTRY:main /OPT:REF /OPT:ICF /MERGE:.rdata=.text /FILEALIGN:512 /MANIFEST:EMBED "/MANIFESTUAC:"level='requireAdministrator'""
+cl /nologo /O1 /Os /GS- /Zl /utf-8 /W3 ravencuu.c /Fe:ravencuu.exe /link /NODEFAULTLIB kernel32.lib shell32.lib user32.lib gdi32.lib /ENTRY:WinMain /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /MERGE:.rdata=.text /FILEALIGN:512 /MANIFEST:EMBED "/MANIFESTUAC:"level='requireAdministrator'""

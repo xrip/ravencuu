@@ -54,38 +54,28 @@ clinfo | grep -i 'compute units'     # -> 11
 Drop the kit onto a boot-mounted disk (e.g. `C:\RavenCU`):
 
 ```
-ravencuu.exe                  the tool (~19 KB, self-elevating)
+ravencuu.exe                  the GUI tool (~20 KB, self-elevating)
 drivers\WinRing0x64.sys       PCI config access (service WinRing0_1_2_0)
 drivers\ThrottleStop.sys      BAR5 MMIO read/write (service ThrottleStop)
-step1-read.cmd                status (read-only)
-step2-pounce-11cu.cmd         the unlock (disable -> write -> raced enable)
-step3-install-boot.cmd        register the boot task "ravencuu"
-step4-remove-boot.cmd         remove the boot task
-step5-cleanup.cmd             remove the BYOVD services + driver files
 ```
 
-Run as Administrator (the exe carries a `requireAdministrator` UAC
-manifest, so a double-click is enough):
+Double-click `ravencuu.exe` (the `requireAdministrator` UAC manifest
+elevates it). The window has three buttons — **UNLOCK**, **INSTALL**,
+**REMOVE** — and a log pane. A hardware check runs automatically at
+startup; the buttons arm only when the unlock is possible on this
+machine (device `1002:15dd`, subsystem `1458:d000`, sane registers).
 
-```
-step1:  ravencuu status
-        expected stock: CC = 0xFF000000, active CUs = 8.
+- **UNLOCK** — one pounce now (disable → write CC → raced enable, one
+  retry). Verify: GPU-Z 512 → 704 shaders, clinfo 8 → 11 CU.
+- **INSTALL** — register the boot task `ravencuu` (ONSTART, SYSTEM,
+  HIGHEST): UNLOCK runs headless with 3 retries at every startup; a lost
+  race just means 8 CU for that boot and a note in `ravencuu.log`. The
+  task binds to the exact copy of `ravencuu.exe` that was run, so keep
+  the exe on a boot-mounted disk.
+- **REMOVE** — delete the boot task (next boot is stock 8 CU).
 
-step2:  ravencuu pounce --count 11 --confirm --retries 3
-        verify afterwards: GPU-Z 512 -> 704 shaders, clinfo 8 -> 11 CU.
-
-step3:  ravencuu install-autostart
-        schtasks task "ravencuu" (ONSTART, SYSTEM, HIGHEST) runs the
-        pounce headless with 3 retries; output goes to ravencuu.log.
-        Brief display blip before login. A lost race means 8 CU for
-        that boot and a note in the log. The task binds to the exact
-        copy of ravencuu.exe that ran this command (any folder, spaces
-        included); that folder just has to be mounted at boot.
-
-step4/5: rollback — remove the task BEFORE cleanup (the task re-deploys
-        the drivers on its own, so cleanup alone does not disable the
-        unlock). A plain reboot is always stock.
-```
+For batch use the same actions auto-fire after the check passes:
+`ravencuu.exe pounce | unlock | install-autostart | uninstall-autostart`.
 
 If the driver service fails to start, Windows Security → Device security
 → Core isolation details → turn OFF **Memory integrity** and the
@@ -101,9 +91,9 @@ install.sh                      Linux one-liner (also built into the release)
 raven-gfx9-cu-unlock.patch      the kernel patch (Linux, 30 lines)
 ravenwin/                       Windows tool (source only; exe built by CI)
   README.md                     full Windows field log + provenance
-  ravencuu/ravencuu.c           single-file C source, ~19 KB exe
-  ravencuu/build.cmd             MSVC build (vswhere + vcvars)
-  kit/step1..5.cmd              manual step scripts
+  ravencuu/ravencuu.c           single-file C source (GUI), ~20 KB exe
+  ravencuu/build.cmd            MSVC build (vswhere + vcvars; CI uses it too)
+  drivers/*.sys                 the two pre-signed BYOVD drivers (MIT, upstream)
   .gitignore
 ```
 

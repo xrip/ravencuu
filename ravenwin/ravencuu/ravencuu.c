@@ -1,10 +1,20 @@
 /* ravencuu - Raven Ridge (1002:15dd) CU unlock for Windows.
  *
- * C port of the retired Go prototype (v0.6) - behavior-identical, ASCII output.
+ * GUI tool (no console): a window with three buttons (UNLOCK / INSTALL /
+ * REMOVE) and a log pane. A hardware check runs automatically at startup
+ * (drivers -> device -> subsystem -> registers); the buttons arm only
+ * when the unlock is possible. All output also lands in ravencuu.log
+ * next to the exe.
+ *
  * The only valid write window is inside amdkmdag init, between the harvest
- * restore and the CU bitmap read. pounce recreates it: disable the device
- * (driver unloads) -> write CC -> enable under a spin loop that re-strikes
- * on the harvest restore (~+284..422 ms), before the bitmap read.
+ * restore and the CU bitmap read. UNLOCK (pounce) recreates it: disable
+ * the device (driver unloads) -> write CC -> enable under a spin loop
+ * that re-strikes on the harvest restore (~+284..422 ms), before the
+ * bitmap read.
+ *
+ * Command-line auto-fire (runs the matching button after the check
+ * passes; used by the boot task): pounce | unlock | install-autostart
+ * | uninstall-autostart.
  *
  * Register path (identical to uefi/RavenCuTest, Linux v6.8 gfx_v9):
  *   GRBM_GFX_INDEX               BAR5 + 0x30800   (selector, segment 1)
@@ -13,9 +23,6 @@
  *   SE0/SH0/all-instances selector write: 0x40000000
  *   CU masks: 9 -> 0x100, 10 -> 0x300, 11 -> 0x700 (bits 8-10 only;
  *   clearing bits 11-15 hung the GPU under Linux - never touch them)
- *
- * Commands: status | pounce --count <9|10|11> --confirm [--retries N]
- *           | install-autostart | uninstall-autostart | cleanup
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -266,6 +273,38 @@ static void rawOut(const char *s)
     sayRaw(s, xstrlen(s));
 }
 
+/* ---- optional GUI sink (set by --ui, posted from the UI thread) ---- */
+static volatile LONG g_uiRunning;   /* non-zero while a worker is running */
+static volatile LONG g_hwOk;        /* hardware check passed -> buttons usable */
+static int g_autoBtn = -1;          /* cmdline-requested button (after check) */
+static HWND g_hwndMain;             /* main window: workers post to THIS one,
+                                     * never to the EDIT control (its wndproc
+                                     * is the system one and would eat it) */
+static HWND g_hwndLog;              /* read-only multiline edit control */
+static HWND g_hwndBtn[4];           /* the action buttons */
+
+static void logAppendUi(const char *s, size_t len)
+{
+    /* A multiline EDIT control breaks lines only on \r\n; our output
+     * uses bare \n, so convert. Copy is capped - EM_REPLACESEL stores
+     * its own text, we just must not race the static buffer. */
+    if (g_hwndLog) {
+        static char copy[2048];
+        size_t i, o = 0;
+        for (i = 0; i < len && o + 2 < sizeof(copy); i++) {
+            if (s[i] == '\n') {
+                copy[o++] = '\r';
+                copy[o++] = '\n';
+            } else {
+                copy[o++] = s[i];
+            }
+        }
+        copy[o] = 0;
+        SendMessageA(g_hwndLog, EM_REPLACESEL, 0, (LPARAM)copy);
+        SendMessageA(g_hwndLog, EM_SCROLLCARET, 0, 0);
+    }
+}
+
 static void say(const char *fmt, ...)
 {
     va_list ap;
@@ -275,7 +314,11 @@ static void say(const char *fmt, ...)
     vformat(&b, fmt, ap);
     va_end(ap);
     if (b.left) *b.p = 0; else g_fmt[sizeof(g_fmt) - 1] = 0;
-    sayRaw(g_fmt, sizeof(g_fmt) - b.left);
+    {
+        size_t n = sizeof(g_fmt) - b.left;
+        sayRaw(g_fmt, n);
+        logAppendUi(g_fmt, n);
+    }
 }
 
 /* directory of the running exe (the log and drivers\ live next to it) */
@@ -451,16 +494,49 @@ static int svcRunning(const char *svc, char *buf, size_t bufsz)
 static int ensureDriver(const char *svc, const char *file)
 {
     static char buf[16384];
-    char dir[MAX_PATH], src[MAX_PATH * 2], dst[MAX_PATH * 2], cmd[MAX_PATH * 2];
+    char src[MAX_PATH * 2], dst[MAX_PATH * 2], cmd[MAX_PATH * 2];
 
-    exeDir(dir, sizeof(dir));
-    xsprintf(src, sizeof(src), "%s\\drivers\\%s", dir, file);
+    /* search order: <CWD>\drivers\<file>, <CWD>\<file>,
+     * <exe>\drivers\<file>, <exe>\..\drivers\<file> (source-tree layout),
+     * then the System32 copy left by a previous run.
+     * CWD-relative first so a GUI launched from the kit folder "just works"
+     * without caring where the exe sits. */
+    src[0] = 0;
+    {
+        char cwd[MAX_PATH], exe[MAX_PATH], probe[MAX_PATH * 2];
+        DWORD fa;
+
+        GetCurrentDirectoryA(sizeof(cwd), cwd);
+        xsprintf(probe, sizeof(probe), "%s\\drivers\\%s", cwd, file);
+        if (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES) {
+            xsprintf(src, sizeof(src), "%s", probe);
+            goto found;
+        }
+        xsprintf(probe, sizeof(probe), "%s\\%s", cwd, file);
+        if (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES) {
+            xsprintf(src, sizeof(src), "%s", probe);
+            goto found;
+        }
+        exeDir(exe, sizeof(exe));
+        xsprintf(probe, sizeof(probe), "%s\\drivers\\%s", exe, file);
+        fa = GetFileAttributesA(probe);
+        if (fa != INVALID_FILE_ATTRIBUTES) {
+            xsprintf(src, sizeof(src), "%s", probe);
+            goto found;
+        }
+        xsprintf(probe, sizeof(probe), "%s\\..\\drivers\\%s", exe, file);
+        if (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES) {
+            GetFullPathNameA(probe, sizeof(src), src, NULL);
+            goto found;
+        }
+found:  ;
+    }
     xsprintf(dst, sizeof(dst), "%s\\System32\\drivers\\%s", sysRoot(), file);
 
-    if (GetFileAttributesA(src) != INVALID_FILE_ATTRIBUTES) {
+    if (src[0]) {
         CopyFileA(src, dst, FALSE);            /* idempotent 14/50 KB copy */
     } else if (GetFileAttributesA(dst) == INVALID_FILE_ATTRIBUTES) {
-        say("[!] driver file missing: %s (and no copy in System32\\drivers)\n", src);
+        say("[!] driver file missing: place %s next to this exe (in .\\ or .\\drivers\\) and retry\n", file);
         return -1;
     }
 
@@ -930,27 +1006,6 @@ static int cmdPounce(int argc, char **argv)
 
 /* ---- the rest of the commands ---- */
 
-static int cmdStatus(void)
-{
-    HANDLE wh, th;
-    RavenDev d;
-    Regs r;
-
-    if (openRaven(&wh, &th, &d)) return 1;
-    if (readRegs(th, d.bar5, &r)) {
-        CloseHandle(wh);
-        CloseHandle(th);
-        return 1;
-    }
-    printRegs(&r);
-    if (r.cc == 0 || r.cc == 0xFFFFFFFFu) {
-        say("  [!] implausible CC value - BAR5 mapping or read path suspect; do NOT write\n");
-    }
-    CloseHandle(wh);
-    CloseHandle(th);
-    return 0;
-}
-
 static int cmdInstallAutostart(void)
 {
     static char buf[16384];
@@ -995,19 +1050,8 @@ static int cmdCleanup(void)
     return 0;
 }
 
-static void usage(void)
-{
-    rawOut("usage:\n"
-           "  ravencuu status                        read-only: find GPU, read CC/USER/GRBM, report CU count\n"
-           "  ravencuu pounce --count 11 --confirm   disable -> write -> raced enable (the unlock)\n"
-           "  ravencuu install-autostart             register the boot task (pounce at every startup, 3 retries)\n"
-           "  ravencuu uninstall-autostart           remove the boot task\n"
-           "  ravencuu cleanup                       remove the BYOVD services + driver files\n");
-}
-
-/* the raw console entry point receives NO argc/argv (that is CRT-startup
- * magic) - tokenize GetCommandLineA ourselves; quote groups supported,
- * which covers every argument this tool takes */
+/* tokenize GetCommandLineA (the console CRT does it for us in normal
+ * builds; we have no CRT, so we do it ourselves). Quote groups supported. */
 static int splitArgs(char *cl, char **argv, int max)
 {
     int n = 0;
@@ -1028,37 +1072,231 @@ static int splitArgs(char *cl, char **argv, int max)
     return n;
 }
 
-int main(void)
-{
-    char *argv[64];
-    int argc, rc;
+/* ---- GUI mode: --ui launches a window with 4 action buttons on the left
+ * and a read-only log pane on the right. Commands run on a worker thread;
+ * the UI thread owns the message pump. Closing the window kills the process
+ * (intentional: pounce is a TIME_CRITICAL spin loop with no safe cancel
+ * point). The log file is still appended, same as console mode. */
 
-    argc = splitArgs(GetCommandLineA(), argv, 64);
-    rawOut("ravencuu 1.0 - Raven Ridge (1002:15dd) CU unlock (C port)\n");
-    if (argc < 2) {
-        usage();
-        return 2;
+/* Array indices for the buttons; the CONTROL IDs exposed to WM_COMMAND
+ * are BTN_ID_BASE+index, because id 0 would collide with the log EDIT's
+ * default ID whose EN_* notifications arrive via the same WM_COMMAND
+ * and would be mistaken for button clicks. */
+enum { BTN_UNLOCK, BTN_INSTALL, BTN_REMOVE, BTN_COUNT };
+#define BTN_ID_BASE 100
+
+static const char *BTN_LABEL[BTN_COUNT] = {
+    "UNLOCK", "INSTALL", "REMOVE"
+};
+
+/* Map a command-line subcommand to the button index that should fire
+ * automatically once the hardware check has passed (the check itself
+ * always runs first). Returns -1 for "no auto-click". */
+static int cmdToButton(int argc, char **argv)
+{
+    if (argc < 1) return -1;
+    if (!xstrcmp(argv[0], "pounce"))    return BTN_UNLOCK;
+    if (!xstrcmp(argv[0], "unlock"))    return BTN_UNLOCK;
+    if (!xstrcmp(argv[0], "install-autostart")) return BTN_INSTALL;
+    if (!xstrcmp(argv[0], "uninstall-autostart")) return BTN_REMOVE;
+    return -1;
+}
+
+/* a no-CRT-valid workaround: declare a fake argv block for cmdPounce,
+ * which expects (int argc, char **argv) like the real console parser */
+static char *TEST_AV[] = { (char *)"pounce", (char *)"--count",
+                            (char *)"11", (char *)"--confirm",
+                            (char *)"--retries", (char *)"1" };
+
+/* full hardware gate: device present, tested subsystem, sane registers.
+ * Prints the details; returns 1 when the unlock is possible. */
+static int checkHardware(void)
+{
+    HANDLE wh = INVALID_HANDLE_VALUE, th = INVALID_HANDLE_VALUE;
+    RavenDev d;
+    Regs r;
+    int ok = 0;
+
+    if (openRaven(&wh, &th, &d)) goto done;          /* prints the reason */
+    if (gateSubsys(&d)) goto done;                    /* not our board */
+    if (readRegs(th, d.bar5, &r)) {
+        say("[!] registers not readable\n");
+        goto done;
     }
-    if (!IsUserAnAdmin()) {
-        rawOut("[!] administrator rights required (BYOVD services + MMIO).\n");
+    printRegs(&r);
+    if (r.cc == 0 || r.cc == 0xFFFFFFFFu) {
+        say("  [!] implausible CC value - BAR5 mapping or read path suspect\n");
+        goto done;
+    }
+    say("[+] hardware check passed - unlock is possible\n");
+    ok = 1;
+done:
+    if (wh != INVALID_HANDLE_VALUE) CloseHandle(wh);
+    if (th != INVALID_HANDLE_VALUE) CloseHandle(th);
+    return ok;
+}
+
+static DWORD WINAPI guiCheckWorker(LPVOID arg)
+{
+    int ok;
+    (void)arg;
+    ok = checkHardware();
+    InterlockedDecrement(&g_uiRunning);
+    PostMessage(g_hwndMain, WM_APP + 2, (WPARAM)ok, 0);
+    return 0;
+}
+
+static DWORD WINAPI guiWorker(LPVOID arg)
+{
+    int idx = (int)(intptr_t)arg;
+    switch (idx) {
+    case BTN_UNLOCK:   cmdPounce(6, TEST_AV); break;
+    case BTN_INSTALL:  cmdInstallAutostart(); break;
+    case BTN_REMOVE:   cmdUninstallAutostart(); break;
+    }
+    InterlockedDecrement(&g_uiRunning);
+    PostMessage(g_hwndMain, WM_APP, 0, 0);
+    return 0;
+}
+
+static void setButtonsEnabled(BOOL on)
+{
+    int i;
+    if (on && !g_hwOk) return;   /* never enable before the check passes */
+    for (i = 0; i < BTN_COUNT; i++) EnableWindow(g_hwndBtn[i], on);
+}
+
+static LRESULT CALLBACK guiWndProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    switch (m) {
+    case WM_CREATE: {
+        RECT rc;
+        GetClientRect(h, &rc);
+        g_hwndMain = h;
+        g_hwndLog = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+            ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL | WS_CHILD | WS_VISIBLE,
+            180, 10, rc.right - 190, rc.bottom - 20,
+            h, NULL, GetModuleHandleA(NULL), NULL);
+        SendMessageA(g_hwndLog, EM_SETLIMITTEXT, 0x100000, 0);
+        {
+            int i, top = 10;
+            for (i = 0; i < BTN_COUNT; i++) {
+                g_hwndBtn[i] = CreateWindowExA(0, "BUTTON", BTN_LABEL[i],
+                    WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_PUSHBUTTON,
+                    10, top, 160, 32,
+                    h, (HMENU)(intptr_t)(BTN_ID_BASE + i),
+                    GetModuleHandleA(NULL), NULL);
+                top += 40;
+            }
+        }
+        say("ravencuu 1.0 - GUI mode (close the window to exit)\n");
+        say("[*] checking hardware...\n");
+        return 0;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(w);
+        int code = HIWORD(w);
+        int idx = id - BTN_ID_BASE;
+        if (code == BN_CLICKED && idx >= 0 && idx < BTN_COUNT) {
+            /* atomic claim: only the WM_COMMAND that wins the CAS starts a
+             * worker; all subsequent clicks see g_uiRunning != 0 until the
+             * worker finishes and posts WM_APP. */
+            LONG prev = InterlockedCompareExchange(&g_uiRunning, 1, 0);
+            if (prev == 0) {
+                setButtonsEnabled(FALSE);
+                CreateThread(NULL, 0, guiWorker, (LPVOID)(intptr_t)idx, 0, NULL);
+            }
+        }
+        return 0;
+    }
+    case WM_APP:          /* action worker finished */
+        setButtonsEnabled(TRUE);
+        return 0;
+    case WM_APP + 2: {    /* hardware check finished, w = ok */
+        if (w) {
+            g_hwOk = 1;
+            setButtonsEnabled(TRUE);
+            if (g_autoBtn >= 0 && g_autoBtn < BTN_COUNT &&
+                InterlockedCompareExchange(&g_uiRunning, 1, 0) == 0) {
+                setButtonsEnabled(FALSE);
+                CreateThread(NULL, 0, guiWorker, (LPVOID)(intptr_t)g_autoBtn, 0, NULL);
+            }
+        } else {
+            say("[!] hardware check failed - buttons stay disabled\n");
+        }
+        return 0;
+    }
+    case WM_SIZE: {
+        RECT rc;
+        GetClientRect(h, &rc);
+        MoveWindow(g_hwndLog, 180, 10, rc.right - 190, rc.bottom - 20, TRUE);
+        return 0;
+    }
+    case WM_CLOSE:
+        DestroyWindow(h);
+        return 0;
+    case WM_DESTROY:
+        /* hard-kill semantics: pounce has no safe cancel point */
+        ExitProcess(0);
+    }
+    return DefWindowProcA(h, m, w, l);
+}
+
+static int guiMain(int autoBtn)
+{
+    WNDCLASSA wc;
+    HWND hwnd;
+
+    openLog();   /* same log file as console mode */
+    g_autoBtn = autoBtn;
+
+    xmemset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc   = guiWndProc;
+    wc.hInstance     = GetModuleHandleA(NULL);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = "ravencuu";
+    wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
+    if (!RegisterClassA(&wc)) {
+        MessageBoxA(NULL, "RegisterClass failed", "ravencuu", MB_ICONERROR);
         return 1;
     }
-    openLog();
-
-    if (!strcmp(argv[1], "status")) rc = cmdStatus();
-    else if (!strcmp(argv[1], "pounce")) rc = cmdPounce(argc - 2, argv + 2);
-    else if (!strcmp(argv[1], "install-autostart")) rc = cmdInstallAutostart();
-    else if (!strcmp(argv[1], "uninstall-autostart")) rc = cmdUninstallAutostart();
-    else if (!strcmp(argv[1], "cleanup")) rc = cmdCleanup();
-    else if (!strcmp(argv[1], "help") || !strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
-        usage();
-        rc = 0;
-    } else {
-        static char t[256];
-        xsprintf(t, sizeof(t), "unknown command \"%s\"\n", argv[1]);
-        rawOut(t);
-        usage();
-        rc = 2;
+    hwnd = CreateWindowExA(0, "ravencuu", "Raven CUU - 11 CU unlock (c) xrip",
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT, CW_USEDEFAULT, 760, 460,
+        NULL, NULL, wc.hInstance, NULL);
+    if (!hwnd) {
+        MessageBoxA(NULL, "CreateWindow failed", "ravencuu", MB_ICONERROR);
+        return 1;
     }
-    return rc;
+    /* hardware check runs automatically; buttons arm on success
+     * (WM_APP+2), and a cmdline-requested action fires right after */
+    if (InterlockedCompareExchange(&g_uiRunning, 1, 0) == 0)
+        CreateThread(NULL, 0, guiCheckWorker, NULL, 0, NULL);
+    {
+        MSG msg;
+        while (GetMessageA(&msg, NULL, 0, 0) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+    }
+    return 0;
 }
+
+/* The GUI binary is built with /SUBSYSTEM:WINDOWS, so Windows calls
+ * WinMain (not main). For backward compatibility with batch / schtasks
+ * callers we still expose console commands via a separate console-sys
+ * build - or, more simply, by re-launching this exe with a special
+ * flag (see below). */
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show)
+{
+    char *argv[64];
+    int argc, autoBtn = -1;
+
+    (void)hInst; (void)hPrev; (void)cmd; (void)show;
+    argc = splitArgs(GetCommandLineA(), argv, 64);
+    if (argc >= 1) autoBtn = cmdToButton(argc - 1, argv + 1);
+    return guiMain(autoBtn);
+}
+
+/* If anyone rebuilds with /SUBSYSTEM:CONSOLE, this main() is used. Kept
+ * for the batch-mode build path so the schtasks task continues to work. */

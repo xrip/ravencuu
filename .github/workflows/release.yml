@@ -42,40 +42,28 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - name: add MSVC to PATH
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+      # build.cmd is the single source of truth for the compile line
+      # (vswhere + vcvars + cl; WinMain entry, WINDOWS subsystem,
+      # kernel32+shell32+user32+gdi32, no CRT, UAC manifest).
       - name: build ravencuu.exe
         shell: cmd
-        run: |
-          cd ravenwin\ravencuu
-          cl /nologo /O1 /Os /GS- /Zl /utf-8 /W3 ravencuu.c /Fe:ravencuu.exe /link /NODEFAULTLIB kernel32.lib shell32.lib /ENTRY:main /OPT:REF /OPT:ICF /MERGE:.rdata=.text /FILEALIGN:512 /MANIFEST:EMBED "/MANIFESTUAC:"level='requireAdministrator'""
+        run: ravenwin\ravencuu\build.cmd
       - name: report binary size
         shell: bash
         run: |
           ls -la ravenwin/ravencuu/ravencuu.exe
           wc -c < ravenwin/ravencuu/ravencuu.exe
       - name: assemble RavenCU kit
-        shell: bash
+        shell: pwsh
         run: |
-          set -e
-          KIT="$(pwd)/RavenCU"
-          rm -rf "$KIT"; mkdir -p "$KIT/drivers"
-          cp ravenwin/ravencuu/ravencuu.exe "$KIT/"
-          cp ravenwin/kit/*.cmd          "$KIT/"
-          cp ravenwin/drivers/*.sys      "$KIT/drivers/"
-          cp ravenwin/README.md          "$KIT/README.txt"
-          # Linux users get the one-liner; bundle it too, prefixed by README.
-          {
-            echo "ravencuu Windows kit ${{ github.ref_name }}"
-            echo
-            cat install.sh | sed 's/^/# /'
-            echo
-            echo "# (use the top-level one-liner, not the comments above)"
-          } > "$KIT/install-linux.sh.readme"
-          ( cd "$KIT/.." && zip -qr RavenCU.zip RavenCU )
-          ls -la "$(pwd)/RavenCU.zip"
+          $KIT = "RavenCU"
+          Remove-Item -Recurse -Force $KIT -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path "$KIT\drivers" | Out-Null
+          Copy-Item ravenwin\ravencuu\ravencuu.exe $KIT\
+          Copy-Item ravenwin\drivers\*.sys $KIT\drivers\
+          Copy-Item ravenwin\README.md "$KIT\README.txt"
+          Compress-Archive -Path $KIT -DestinationPath RavenCU.zip
+          Get-Item RavenCU.zip | Select-Object Name, Length
       - name: upload RavenCU.zip
         uses: softprops/action-gh-release@v2
         with:
