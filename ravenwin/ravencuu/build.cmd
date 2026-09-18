@@ -7,6 +7,8 @@ rem Big buffers are file-static in ravencuu.c so no __chkstk is emitted.
 rem /MANIFESTUAC makes the exe request elevation via UAC on its own;
 rem the boot task (SYSTEM) and elevated shells are unaffected.
 setlocal
+rem run from the script's own directory, whatever the caller's cwd is
+cd /d "%~dp0"
 set "VSW=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 for /f "usebackq tokens=*" %%i in (`"%VSW%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
 if not defined VSDIR (
