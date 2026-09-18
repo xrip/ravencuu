@@ -1,0 +1,63 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create.outputs.upload_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: create release
+        id: create
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+
+  linux:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh syntax check
+        run: bash -n install.sh
+      - name: verify embedded patch matches repo copy
+        run: |
+          awk "/<<'RAVEN_PATCH_EOF'\$/{flag=1;next} /^RAVEN_PATCH_EOF\$/{flag=0} flag" install.sh > /tmp/embedded.patch
+          diff -u /tmp/embedded.patch raven-gfx9-cu-unlock.patch
+      - name: upload install.sh
+        uses: softprops/action-gh-release@v2
+        with:
+          files: install.sh
+          fail_on_unmatched_files: true
+
+  windows:
+    runs-on: windows-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: add MSVC to PATH
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: build ravencuu.exe
+        shell: cmd
+        run: |
+          cd ravenwin\ravencuu
+          cl /nologo /O1 /Os /GS- /Zl /utf-8 /W3 ravencuu.c /Fe:ravencuu.exe /link /NODEFAULTLIB kernel32.lib shell32.lib /ENTRY:main /OPT:REF /OPT:ICF /MERGE:.rdata=.text /FILEALIGN:512 /MANIFEST:EMBED "/MANIFESTUAC:"level='requireAdministrator'""
+      - name: report binary size
+        shell: bash
+        run: |
+          ls -la ravenwin/ravencuu/ravencuu.exe
+          wc -c < ravenwin/ravencuu/ravencuu.exe
+      - name: upload ravencuu.exe
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ravenwin/ravencuu/ravencuu.exe
+          fail_on_unmatched_files: true

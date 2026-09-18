@@ -6,7 +6,7 @@
 # (module param raven_cu_count, default 8 = stock no-op, strictly gated
 # to PCI 1002:15dd subsystem 1458:d000).
 #
-#   install:   curl -fsSL https://raw.githubusercontent.com/xrip/ravencuu/MASTER/install.sh | sudo bash
+#   install:   curl -fsSL https://github.com/xrip/ravencuu/releases/latest/download/install.sh | sudo bash
 #   count 10:  ... | sudo bash -s -- --count 10
 #   uninstall: ... | sudo bash -s -- --uninstall
 #   local:     sudo bash linux/install.sh [--count N | --uninstall | --patch FILE]

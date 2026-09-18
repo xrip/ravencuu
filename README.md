@@ -22,11 +22,13 @@ platform, which is why both exist:
 ## Linux install (Ubuntu 6.8.x)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/xrip/ravencuu/master/install.sh | sudo bash
+curl -fsSL https://github.com/xrip/ravencuu/releases/latest/download/install.sh | sudo bash
 ```
 
-Read it first if you prefer: `curl -fsSL <url> | less`, then pipe to
-`sudo bash`. From a checkout: `sudo bash install.sh`.
+The script is fetched from the latest GitHub release (so the
+release pipeline is what you actually run, not the repo HEAD).
+Read it first if you prefer: `curl -fsSL <url> | less`, then pipe
+to `sudo bash`. From a checkout: `sudo bash install.sh`.
 
 The script:
 
@@ -94,9 +96,10 @@ If the driver service fails to start, Windows Security → Device security
 ```
 README.md                       you are here
 LICENSE                         MIT
-install.sh                      Linux one-liner (the curl|bash)
+.github/workflows/release.yml   CI: builds Windows exe on tag, uploads release artifacts
+install.sh                      Linux one-liner (also built into the release)
 raven-gfx9-cu-unlock.patch      the kernel patch (Linux, 30 lines)
-ravenwin/                       Windows tool
+ravenwin/                       Windows tool (source only; exe built by CI)
   README.md                     full Windows field log + provenance
   ravencuu/ravencuu.c           single-file C source, ~19 KB exe
   ravencuu/build.cmd             MSVC build (vswhere + vcvars)
