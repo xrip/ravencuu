@@ -56,8 +56,28 @@ jobs:
         run: |
           ls -la ravenwin/ravencuu/ravencuu.exe
           wc -c < ravenwin/ravencuu/ravencuu.exe
-      - name: upload ravencuu.exe
+      - name: assemble RavenCU kit
+        shell: bash
+        run: |
+          set -e
+          KIT="$(pwd)/RavenCU"
+          rm -rf "$KIT"; mkdir -p "$KIT/drivers"
+          cp ravenwin/ravencuu/ravencuu.exe "$KIT/"
+          cp ravenwin/kit/*.cmd          "$KIT/"
+          cp ravenwin/drivers/*.sys      "$KIT/drivers/"
+          cp ravenwin/README.md          "$KIT/README.txt"
+          # Linux users get the one-liner; bundle it too, prefixed by README.
+          {
+            echo "ravencuu Windows kit ${{ github.ref_name }}"
+            echo
+            cat install.sh | sed 's/^/# /'
+            echo
+            echo "# (use the top-level one-liner, not the comments above)"
+          } > "$KIT/install-linux.sh.readme"
+          ( cd "$KIT/.." && zip -qr RavenCU.zip RavenCU )
+          ls -la "$(pwd)/RavenCU.zip"
+      - name: upload RavenCU.zip
         uses: softprops/action-gh-release@v2
         with:
-          files: ravenwin/ravencuu/ravencuu.exe
+          files: RavenCU.zip
           fail_on_unmatched_files: true
